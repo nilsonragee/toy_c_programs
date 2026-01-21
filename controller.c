@@ -94,61 +94,92 @@ int print_controller_generic( char *buffer, size_t buffer_size, DIJOYSTATE *j ) 
 
 int print_controller_ps4( char *buffer, size_t buffer_size, DIJOYSTATE *j ) {
 	// Don't judge...
-	int cursor = 0;
 	BYTE bRect = j->rgbButtons[ 0 ];
 	BYTE bCross = j->rgbButtons[ 1 ];
 	BYTE bCircle = j->rgbButtons[ 2 ];
 	BYTE bTri = j->rgbButtons[ 3 ];
-	const char *rect = ( bRect ) ? u8"□" : "-";
-	const char *cross = ( bCross ) ? u8"x" : "-";
-	const char *circle = ( bCircle ) ? u8"o" : "-";
-	const char *tri = ( bTri ) ? u8"△" : "-";
+	const char *pszShapes[ 4 ] = {
+		( bRect )   ? u8"□" : "-",
+		( bCross )  ? u8"x" : "-",
+		( bCircle ) ? u8"o" : "-",
+		( bTri )    ? u8"△" : "-"
+	};
 
-	const char *arUp = "-";
-	const char *arRight = "-";
-	const char *arDown = "-";
-	const char *arLeft = "-";
-	DWORD arrows = j->rgdwPOV[ 0 ];
-	DWORD degrees = 0;
-	if ( arrows != 0xFFFFFFFF ) {
-		degrees = arrows / 100;
-		int direction = ( arrows + 2250 ) / 4500;  // Round to nearest 45 degrees
-		switch ( direction % 8 ) {
-			case 0: arUp = u8"↑"; break;
-			case 1: arUp = u8"↑"; arRight = u8"→"; break;
-			case 2: arRight = u8"→"; break;
-			case 3: arRight = u8"→"; arDown = u8"↓"; break;
-			case 4: arDown = u8"↓"; break;
-			case 5: arDown = u8"↓"; arLeft = u8"←"; break;
-			case 6: arLeft = u8"←"; break;
-			case 7: arLeft = u8"←"; arUp = u8"↑"; break;
+	const char *pszArrows[ 4 ] = {
+		"-",  // ArrowUp
+		"-",  // ArrowRight
+		"-",  // ArrowDown
+		"-"   // ArrowLeft
+	};
+	DWORD dwArrows = j->rgdwPOV[ 0 ];
+	DWORD dwDegrees = 0;
+	if ( dwArrows != 0xFFFFFFFF ) {
+		dwDegrees = dwArrows / 100;
+		DWORD dwDirection = ( dwArrows + 2250 ) / 4500;  // Round to nearest 45 degrees
+		switch ( dwDirection % 8 ) {
+			case 1: pszArrows[ 1 ] = u8"→";  // Fall-through
+			case 0: pszArrows[ 0 ] = u8"↑"; break;
+
+			case 3: pszArrows[ 2 ] = u8"↓";  // Fall-through
+			case 2: pszArrows[ 1 ] = u8"→"; break;
+
+			case 5: pszArrows[ 3 ] = u8"←";  // Fall-through
+			case 4: pszArrows[ 2 ] = u8"↓"; break;
+
+			case 7: pszArrows[ 0 ] = u8"↑";  // Fall-through
+			case 6: pszArrows[ 3 ] = u8"←"; break;
 		}
 	}
-	LONG L2 = j->lRx;
-	LONG R2 = j->lRy;
-	float fL2 = L2 * ( 1.0f / 32767.0f ) * 0.5f;
-	float fR2 = R2 * ( 1.0f / 32767.0f ) * 0.5f;
-	LONG Lstick[ 2 ] = { j->lX, j->lY };
-	LONG Rstick[ 2 ] = { j->lZ, j->lRz };
-	float fLstick[ 2 ] = { Lstick[ 0 ] * ( 1.0f / 32767.0f ) - 1.0f, Lstick[ 1 ] * ( 1.0f / 32767.0f ) - 1.0f };
-	if ( fLstick[ 1 ] != 0 )  fLstick[ 1 ] *= -1.0f;  // Invert Y axis
-	float fRstick[ 2 ] = { Rstick[ 0 ] * ( 1.0f / 32767.0f ) - 1.0f, Rstick[ 1 ] * ( 1.0f / 32767.0f ) - 1.0f };
-	if ( fRstick[ 1 ] != 0 )  fRstick[ 1 ] *= -1.0f;  // Invert Y axis
+	LONG lL2R2[ 2 ] = {
+		// L2:
+		j->lRx,
+		// R2:
+		j->lRy
+	};
+	float fL2R2[ 2 ] = {
+		// From: 0..65535
+		//   To: 0f..1f
+		// L2:
+		lL2R2[ 0 ] * ( 1.0f / 65535.0f ),
+		// R2:
+		lL2R2[ 1 ] * ( 1.0f / 65535.0f )
+	};
+	LONG lSticks[ 4 ] = {
+		// Left:
+		j->lX, j->lY,
+		// Right:
+		j->lZ, j->lRz
+	};
+	float fSticks[ 4 ] = {
+		// From: 0..32767..65535
+		//   To: -1f..0f..1f
+		// Left:
+		( lSticks[ 0 ] == 32767 ) ? lSticks[ 0 ] * ( 1.0f / 32767.0f ) - 1.0f : lSticks[ 0 ] * ( 1.0f / 32767.5f ) - 1.0f,
+		( lSticks[ 1 ] == 32767 ) ? lSticks[ 1 ] * ( 1.0f / 32767.0f ) - 1.0f : lSticks[ 1 ] * ( 1.0f / 32767.5f ) - 1.0f,
+		// Right:
+		( lSticks[ 2 ] == 32767 ) ? lSticks[ 2 ] * ( 1.0f / 32767.0f ) - 1.0f : lSticks[ 2 ] * ( 1.0f / 32767.5f ) - 1.0f,
+		( lSticks[ 3 ] == 32767 ) ? lSticks[ 3 ] * ( 1.0f / 32767.0f ) - 1.0f : lSticks[ 3 ] * ( 1.0f / 32767.5f ) - 1.0f
+	};
+	if ( fSticks[ 1 ] != 0 )  fSticks[ 1 ] *= -1.0f;  // Invert L stick Y axis without turning 0.0 into -0.0
+	if ( fSticks[ 3 ] != 0 )  fSticks[ 3 ] *= -1.0f;  // Invert R stick Y axis without turning 0.0 into -0.0
 	BYTE bL1 = j->rgbButtons[ 4 ];
 	BYTE bR1 = j->rgbButtons[ 5 ];
 	BYTE bL2 = j->rgbButtons[ 6 ];
 	BYTE bR2 = j->rgbButtons[ 7 ];
 	BYTE bSHARE = j->rgbButtons[ 8 ];
-	const char *SHARE = ( bSHARE ) ? "SHARE" : "-";
 	BYTE bOPTIONS = j->rgbButtons[ 9 ];
-	const char *OPTIONS = ( bOPTIONS ) ? "OPTIONS" : "-";
 	BYTE bLstick = j->rgbButtons[ 10 ];
 	BYTE bRstick = j->rgbButtons[ 11 ];
 	BYTE bPS = j->rgbButtons[ 12 ];
 	BYTE bTOUCH = j->rgbButtons[ 13 ];
-	const char *PS = ( bPS ) ? "PS" : "-";
-	const char *TOUCH = ( bTOUCH ) ? "TOUCH" : "-";
+	const char *pszSpecials[ 4 ] = {
+		( bSHARE )   ? "SHARE"   : "-",
+		( bOPTIONS ) ? "OPTIONS" : "-",
+		( bPS )      ? "PS"      : "-",
+		( bTOUCH )   ? "TOUCH"   : "-"
+	};
 	
+	int cursor = 0;
 	cursor += snprintf( buffer + cursor, buffer_size - cursor,
 		"Arrows: [%s, %s, %s, %s] (%3ld)\n"
 		"Shapes: [%s, %s, %s, %s]\n"
@@ -158,14 +189,14 @@ int print_controller_ps4( char *buffer, size_t buffer_size, DIJOYSTATE *j ) {
 		"R2: [%3hhu, %5ld] (%9.6f)\n"
 		"L Stick: [%3hhu, %5ld,%5ld] (%9.6f,%9.6f)\n"
 		"R Stick: [%3hhu, %5ld,%5ld] (%9.6f,%9.6f)\n",
-		arUp, arRight, arDown, arLeft, degrees,
-		rect, cross, circle, tri,
-		SHARE, OPTIONS, PS, TOUCH,
+		pszArrows[ 0 ], pszArrows[ 1 ], pszArrows[ 2 ], pszArrows[ 3 ], dwDegrees,
+		pszShapes[ 0 ], pszShapes[ 1 ], pszShapes[ 2 ], pszShapes[ 3 ],
+		pszSpecials[ 0 ], pszSpecials[ 0 ], pszSpecials[ 0 ], pszSpecials[ 0 ],
 		bL1, bR1,
-		bL2, L2, fL2,
-		bR2, R2, fR2,
-		bLstick, Lstick[ 0 ], Lstick[ 1 ], fLstick[ 0 ], fLstick[ 1 ],
-		bRstick, Rstick[ 0 ], Rstick[ 1 ], fRstick[ 0 ], fRstick[ 1 ] );
+		bL2, lL2R2[ 0 ], fL2R2[ 0 ],
+		bR2, lL2R2[ 1 ], fL2R2[ 1 ],
+		bLstick, lSticks[ 0 ], lSticks[ 1 ], fSticks[ 0 ], fSticks[ 1 ],
+		bRstick, lSticks[ 2 ], lSticks[ 3 ], fSticks[ 2 ], fSticks[ 3 ] );
 
 	return cursor;
 }
