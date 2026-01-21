@@ -80,11 +80,8 @@ int print_controller_generic( char *buffer, size_t buffer_size, DIJOYSTATE *j ) 
 
 	// Buttons
 	cursor += snprintf( buffer + cursor, buffer_size - cursor, "rgbButtons:\n" );
-	// Pointer to a sized array of 32 elements
-	//   as defined in the DIJOYSTATE struct.
-	// `BYTE *` is fine too.
-	BYTE ( *pbValue )[ 32 ] = &j->rgbButtons;
-	for ( int i = 0; i < 32; i += 1 ) {
+	BYTE *pbValue = ( BYTE * )&j->rgbButtons;
+	for ( int i = 0; i < 32 / 4; i += 1 ) {
 		cursor += snprintf( buffer + cursor, buffer_size - cursor,
 			"\t[%d]: [%3hhu]\n", i, *( pbValue + i ) );
 	}
