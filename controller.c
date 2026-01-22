@@ -3,13 +3,50 @@
 #include <stdlib.h>
 
 #include <Windows.h>
-// DirectX 8
+// DirectInput8, part of DirectX 8.
 #define DIRECTINPUT_VERSION 0x0800
 #include <dinput.h>
 
 #pragma comment(lib, "dinput8.lib")
 #pragma comment(lib, "dxguid.lib")
 #pragma comment(lib, "user32.lib")
+
+#define CONTRL_ALLOC( count, type )                          malloc( count * sizeof( type ) )
+#define CONTRL_REALLOC( pointer, old_size, new_size, type )  realloc( pointer, new_size * sizeof( type ) )
+#define CONTRL_FREE( pointer )                               free( pointer )
+
+#ifndef CONTRL_DEBUG
+	#define CONTRL_DEBUG 0
+#endif
+
+#if CONTRL_DEBUG
+	#define CONTRL_TRACE( format, ... )                        contrl__fprintf( stdout, "TRACE: ", 7, format, __VA_ARGS__ ); putc( '\n', stdout )
+	#define CONTRL_TRACE2( prefix, prefix_size, format, ... )  contrl__fprintf( stdout, prefix, prefix_size, format, __VA_ARGS__ )
+#else
+	#define CONTRL_TRACE( format, ... )
+	#define CONTRL_TRACE2( prefix, prefix_size, format, ... )
+#endif /* CONTRL_DEBUG */
+
+#define CONTRL_ERROR( exit_code, format, ... )  contrl__fprintf( stderr, "ERROR: ", 7, format, __VA_ARGS__ ); exit( exit_code )
+#define CONTRL_WARN( format, ... )              contrl__fprintf( stdout, "WARNING: ", 9, format, __VA_ARGS__ )
+#define CONTRL_PRINT( format, ... )             contrl__fprintf( stdout, NULL, 0, format, __VA_ARGS__ )
+#define CONTRL_WPRINT( format, ... )            contrl__fwprintf( stdout, NULL, 0, format, __VA_ARGS__ )
+
+static void contrl__fprintf( FILE *stream, const char *prefix, size_t prefix_size, const char *format, ... ) {
+	fwrite( prefix, sizeof( char ), prefix_size, stream );
+	va_list args;
+	va_start( args, format );
+	vfprintf( stream, format, args );
+	va_end( args );
+}
+
+static void contrl__fwprintf( FILE *stream, const wchar_t *prefix, size_t prefix_size, const wchar_t *format, ... ) {
+	fwrite( prefix, sizeof( char ), prefix_size, stream );
+	va_list args;
+	va_start( args, format );
+	vfwprintf( stream, format, args );
+	va_end( args );
+}
 
 /*
 typedef struct DIJOYSTATE {
@@ -33,15 +70,30 @@ enum bool_e {
 typedef uint8_t bool;
 #endif
 
-typedef struct EnumDevicesContext {
-	LPDIRECTINPUT8 pDirectInput;
-	LPDIRECTINPUTDEVICE8 *ppJoystickDevice;
-} EnumDevicesContext;
+typedef struct DeviceGetFirstContext {
+	LPDIRECTINPUT8        pDirectInput;        // In parameter.  Pointer to the instance of DirectInput8.
+	LPDIRECTINPUTDEVICE8 *ppControllerDevice;  // In-Out parameter.  Pointer to a pointer to where created device pointer (LPDIRECTINPUTDEVICE8) will be stored.
+	DIDEVICEINSTANCE     *pDeviceInstance;     // In-Out parameter, can be NULL.  Pointer to where DIDEVICEINSTANCE will be stored.
+} DeviceGetFirstContext;
 
-BOOL CALLBACK EnumDevicesCallback( const DIDEVICEINSTANCE *pInstance, EnumDevicesContext *pContext ) {
-	HRESULT hResult = IDirectInput8_CreateDevice( pContext->pDirectInput, &pInstance->guidInstance, pContext->ppJoystickDevice, NULL );
-	if ( FAILED( hResult ) )  return DIENUM_CONTINUE;
+static BOOL CALLBACK contrl__device_get_first_callback( const DIDEVICEINSTANCE *pInstance, DeviceGetFirstContext *pContext ) {
+	HRESULT hResult = IDirectInput8_CreateDevice(
+		/*                  this */ pContext->pDirectInput,
+		/*                 rguid */ &pInstance->guidInstance,
+		/* lplpDirectInputDevice */ pContext->ppControllerDevice,
+		/*             pUnkOuter */ NULL );
+	if ( hResult != DI_OK )  return DIENUM_CONTINUE;
+	if ( pContext->pDeviceInstance != NULL )  *pContext->pDeviceInstance = *pInstance;
 	return DIENUM_STOP;
+}
+
+typedef struct DeviceEffectsSupportedContext {
+	int nEffects;  // Out parameter.  Set to 0 before call!  Number of effects supported by the force-feedback system.
+} DeviceEffectsSupportedContext;
+
+static BOOL CALLBACK contrl__device_effects_supported_callback( const DIEFFECTINFO *pDIEffectInfo, DeviceEffectsSupportedContext *pContext ) {
+	pContext->nEffects += 1;
+	return DIENUM_CONTINUE;
 }
 
 // ESC [ s  -- Save Cursor
@@ -51,7 +103,81 @@ BOOL CALLBACK EnumDevicesCallback( const DIDEVICEINSTANCE *pInstance, EnumDevice
 #define CONSOLE_RC "\x1B[u"
 #define CONSOLE_RC_LEN 3
 
-int print_controller_generic( char *buffer, size_t buffer_size, DIJOYSTATE *j ) {
+static void contrl__debug_print_device_info( const DIDEVICEINSTANCE *i ) {
+	const GUID *const gI = &i->guidInstance;
+	const GUID *const gP = &i->guidProduct;
+	const GUID *const gD = &i->guidFFDriver;
+
+	char data4Bytes[ 64 ] = { 0 };  // Only 51 bytes are used, but aligned to 64.
+	char *const gIData4 = data4Bytes;
+	char *const gPData4 = gIData4 + 17;  // 16 chars + 1 null-terminator
+	char *const gDData4 = gPData4 + 17;  // 16 chars + 1 null-terminator
+	for ( int i = 0; i < 8; i += 1 ) {
+		// Write 1 byte of each GUID simultaneously.
+		sprintf( &gIData4[ 2 * i ], "%02X", gI->Data4[ i ] );
+		sprintf( &gPData4[ 2 * i ], "%02X", gP->Data4[ i ] );
+		sprintf( &gDData4[ 2 * i ], "%02X", gD->Data4[ i ] );
+	}
+
+	CONTRL_TRACE2( "TRACE: ", 7,
+		"Device info:\n"
+		"  dwSize: %lu\n"
+		"  guidInstance: 0x%08X %04hX %04hX %s (\"%.*s\")\n"
+		"  guidProduct: 0x%08X %04hX %04hX %s (\"%.*s\")\n"
+		"  dwDevType: 0x%08X\n",
+		i->dwSize,
+		gI->Data1, gI->Data2, gI->Data3, gIData4, 6, &gI->Data4[ 2 ],
+		gP->Data1, gP->Data2, gP->Data3, gPData4, 6, &gP->Data4[ 2 ],
+		i->dwDevType );
+
+#if UNICODE
+	CONTRL_WPRINT( 
+		L"  tszInstanceName: \"%s\"\n"
+		L"  tszProductName: \"%s\"\n",
+		i->tszInstanceName, i->tszProductName );
+#else
+	CONTRL_PRINT( 
+		"  tszInstanceName: \"%s\"\n"
+		"  tszProductName: \"%s\"\n",
+		i->tszInstanceName, i->tszProductName );
+#endif
+
+	CONTRL_PRINT(
+		"  guidFFDriver: 0x%08X %04hX %04hX %s (\"%.*s\")\n"
+		"  wUsagePage: 0x%08X\n"
+		"  wUsage: 0x%08X\n",
+		gD->Data1, gD->Data2, gD->Data3, gDData4, 6, &gD->Data4[ 2 ],
+		i->wUsagePage,
+		i->wUsage );
+}
+
+static void contrl__debug_print_device_capabilities( const DIDEVCAPS *c ) {
+	CONTRL_TRACE( "Device capabilities:\n"
+		"  dwSize: %u\n"
+		"  dwFlags: 0x%08X\n"
+		"  dwDevType: 0x%08X\n"
+		"  dwAxes: %u\n"
+		"  dwButtons: %u\n"
+		"  dwPOVs: %u\n"
+		"  dwFFSamplePeriod: %u\n"
+		"  dwFFMinTimeResolution: %u\n"
+		"  dwFirmwareRevision: 0x%08X\n"
+		"  dwHardwareRevision: 0x%08X\n"
+		"  dwFFDriverVersion: 0x%08X",
+		c->dwSize,
+		c->dwFlags,
+		c->dwDevType,
+		c->dwAxes,
+		c->dwButtons,
+		c->dwPOVs,
+		c->dwFFSamplePeriod,
+		c->dwFFMinTimeResolution,
+		c->dwFirmwareRevision,
+		c->dwHardwareRevision,
+		c->dwFFDriverVersion );
+}
+
+int contrl_print_state_generic( char *buffer, size_t buffer_size, DIJOYSTATE *j ) {
 	int cursor = 0;
 
 	// Position + Rotation
@@ -83,13 +209,75 @@ int print_controller_generic( char *buffer, size_t buffer_size, DIJOYSTATE *j ) 
 	BYTE *pbValue = ( BYTE * )&j->rgbButtons;
 	for ( int i = 0; i < 32 / 4; i += 1 ) {
 		cursor += snprintf( buffer + cursor, buffer_size - cursor,
-			"\t[%d]: [%3hhu]\n", i, *( pbValue + i ) );
+			"  [%2d]: [%3hhu]  [%2d]: [%3hhu]  [%2d]: [%3hhu]  [%2d]: [%3hhu]\n",
+			i +  0, *( pbValue + i +  0 ),
+			i +  8, *( pbValue + i +  8 ),
+			i + 16, *( pbValue + i + 16 ),
+			i + 24, *( pbValue + i + 24 ) );
 	}
 
 	return cursor;
 }
 
-int print_controller_ps4( char *buffer, size_t buffer_size, DIJOYSTATE *j ) {
+static void contrl_test_haptics( const LPDIRECTINPUTDEVICE8 pControllerDevice ) {
+	DIEFFECT effect = { 0 };
+	effect.dwSize = sizeof( DIEFFECT );
+	effect.dwFlags = DIEFF_CARTESIAN | DIEFF_OBJECTIDS;
+	effect.dwDuration = 5 * 1000;  // In Us - microseconds
+	effect.dwSamplePeriod = 0;  // Default
+	// effect.dwGain = DI_FFNOMINALMAX;
+	effect.lpvTypeSpecificParams = DIEFT_CONSTANTFORCE;
+	
+
+	// In range of: [-10_000, 10_000]
+	DICONSTANTFORCE cForce = { .lMagnitude = 100000 };
+
+	effect.cbTypeSpecificParams = sizeof( DICONSTANTFORCE );
+	effect.lpvTypeSpecificParams = &cForce;
+
+	/* Create Force-feedback effect */
+
+	LPDIRECTINPUTEFFECT pDIEffect = NULL;
+	HRESULT hDIResult = IDirectInputDevice8_CreateEffect(
+		/*      this */ pControllerDevice,
+		/*      guid */ &GUID_ConstantForce,
+		/*     lpeff */ &effect,  // Passed effect setup parameters
+		/*    ppdeff */ &pDIEffect,  // Returned DirectInput effect object
+		/* pUnkOuter */ NULL );
+	if ( hDIResult != DI_OK ) {
+		const char *szError;
+		switch ( hDIResult ) {
+			case DIERR_DEVICEFULL:     szError = "DIERR_DEVICEFULL"; break;
+			case DIERR_DEVICENOTREG:   szError = "DIERR_DEVICENOTREG"; break;
+			case DIERR_INVALIDPARAM:   szError = "DIERR_INVALIDPARAM"; break;
+			case DIERR_NOTINITIALIZED: szError = "DIERR_NOTINITIALIZED"; break;
+			case E_NOTIMPL:            szError = "E_NOTIMPL"; break;
+			default: szError = "(Unknown)";
+		}
+		CONTRL_ERROR( -11, "Failed to create force-feedback effect. (0x%X=%s)\n", hDIResult, szError );
+	}
+
+	/* Download effect - place the effect on the device */
+
+	// What a dumb name... Upload, Place, Set - any would have made more sense.
+	hDIResult = IDirectInputEffect_Download( pDIEffect );
+	if ( hDIResult != DI_OK ) {
+		CONTRL_ERROR( -12, "Failed to upload effect to controller device. (0x%X)\n", hDIResult );
+	}
+
+	/* Start the effect */
+
+	DWORD dwIterations = 1;
+	// DIES_SOLO - Stop all other effects
+	// DIES_NODOWNLOAD - Do not download automatically
+	DWORD dwFlags = 0;
+	hDIResult = IDirectInputEffect_Start( pDIEffect, dwIterations, dwFlags );
+	if ( hDIResult != DI_OK ) {
+		CONTRL_ERROR( -13, "Failed to start effect on controller device. (0x%x)\n", hDIResult );
+	}
+}
+
+int contrl_print_state_ps4( char *buffer, size_t buffer_size, DIJOYSTATE *j ) {
 	// Don't judge...
 	BYTE bRect = j->rgbButtons[ 0 ];
 	BYTE bCross = j->rgbButtons[ 1 ];
@@ -201,10 +389,9 @@ int print_controller_ps4( char *buffer, size_t buffer_size, DIJOYSTATE *j ) {
 int main( int arguments_count, char *arguments[] ) {
 	HINSTANCE hInstance = GetModuleHandleA( NULL ); // Current program's handle
 	if ( hInstance == NULL ) {
-		fprintf( stderr, "Failed to get current's program module handle. (hInstance=0x%X)\n", hInstance );
-		return -1;
+		CONTRL_ERROR( -1, "Failed to get current program's module handle. (hInstance=0x%X)\n", hInstance );
 	}
-	printf( "Got current program's module handle. (hInstance=0x%X)\n", *hInstance );
+	CONTRL_PRINT( "Got current program's module handle. (hInstance=0x%X)\n", *hInstance );
 
 	// Enable control escape codes to save/reset cursor position.
 	DWORD dwMode;
@@ -216,64 +403,100 @@ int main( int arguments_count, char *arguments[] ) {
 
 	HRESULT hDIResult;
 	LPDIRECTINPUT8 pDirectInput = NULL;
-	hDIResult = DirectInput8Create( hInstance, DIRECTINPUT_VERSION, &IID_IDirectInput8, &pDirectInput, NULL );
+	hDIResult = DirectInput8Create(
+		/*     hInst */ hInstance,
+		/* dwVersion */ DIRECTINPUT_VERSION,
+		/*   riidltf */ &IID_IDirectInput8,
+		/*    ppvOut */ &pDirectInput,
+		/* punkOuter */ NULL );
 	if ( hDIResult != DI_OK ) {
-		fprintf( stderr, "Failed to initialize DirectInput (version=0x%X). (0x%X)\n", DIRECTINPUT_VERSION, hDIResult );
-		return -2;
+		CONTRL_ERROR( -2, "Failed to initialize DirectInput8. (0x%X)\n", hDIResult );
 	}
-	printf( "Initialized DirectInput (version=0x%X).\n", DIRECTINPUT_VERSION );
+	CONTRL_PRINT( "Initialized DirectInput8.\n", NULL );
 
 	/* Enumerate attached gamepad devices */
 
-	LPDIRECTINPUTDEVICE8 pJoystickDevice = NULL;
-	EnumDevicesContext ctx = { .pDirectInput = pDirectInput, .ppJoystickDevice = &pJoystickDevice };
+	DIDEVICEINSTANCE diDeviceInstance;
+	LPDIRECTINPUTDEVICE8 pControllerDevice = NULL;
+	DeviceGetFirstContext ctxDeviceFirst = {
+		.pDirectInput       = pDirectInput,        // In
+		.ppControllerDevice = &pControllerDevice,  // In-Out
+		.pDeviceInstance    = &diDeviceInstance    // In-Out
+	};
 enumDevices:
-	hDIResult = IDirectInput8_EnumDevices( pDirectInput, DI8DEVCLASS_GAMECTRL, EnumDevicesCallback, &ctx, DIEDFL_ATTACHEDONLY );
+	hDIResult = IDirectInput8_EnumDevices(
+		/*       this */ pDirectInput,
+		/*  dwDevType */ DI8DEVCLASS_GAMECTRL,
+		/* lpCallback */ contrl__device_get_first_callback,
+		/*      pvRef */ &ctxDeviceFirst,
+		/*    dwFlags */ DIEDFL_ATTACHEDONLY );
 	if ( hDIResult != DI_OK ) {
-		fprintf( stderr, "Failed to enumerate devices. (0x%X)\n", hDIResult );
-		return -3;
-	} else if ( pJoystickDevice == NULL ) {
-		printf( "No attached Joysticks found. Connect one and try again.\n");
+		CONTRL_ERROR( -3, "Failed to enumerate attached devices. (0x%X)\n", hDIResult );
+	} else if ( pControllerDevice == NULL ) {
+		CONTRL_WARN( "No attached controllers found. Connect one and try again.\n", NULL );
 		system("pause");
 		goto enumDevices;
 	}
-	printf( "Found attached Joystick device.\n" );
+	CONTRL_PRINT( "Found attached controller device.\n", NULL );
+
+	/* Print device info */
+
+#if CONTRL_DEBUG
+	contrl__debug_print_device_info( &diDeviceInstance );
+#endif
 
 	/* Set Joystick data format */
 
-	hDIResult = IDirectInputDevice8_SetDataFormat( pJoystickDevice, &c_dfDIJoystick );
+	hDIResult = IDirectInputDevice8_SetDataFormat(
+		/* this */ pControllerDevice,
+		/* lpdf */ &c_dfDIJoystick );
 	if ( hDIResult != DI_OK ) {
-		fprintf( stderr, "Failed to set Joystick device data format to '%s' (0x%X).\n", "c_dfDIJoystick", hDIResult );
-		return -4;
+		CONTRL_ERROR( -4, "Failed to set controller device data format to '%s' (0x%X).\n", "c_dfDIJoystick", hDIResult );
 	}
-	printf( "Set Joystick device data format to '%s'.\n", "c_dfDIJoystick" );
+	CONTRL_TRACE( "Set controller device data format to '%s'.", "c_dfDIJoystick" );
 
 	HWND hWindow = GetConsoleWindow();
 	if ( hWindow == NULL ) {
-		fprintf( stderr, "Failed to get console window. (hWindow=0x%X)\n", hWindow );
-		return -5;
+		CONTRL_ERROR( -5, "Failed to get console window. (hWindow=0x%X)\n", hWindow );
 	}
-	printf( "Got console window. (hWindow=0x%X)\n", hWindow );
+	CONTRL_TRACE( "Got console window. (hWindow=0x%X)", hWindow );
 	
 	/* Set cooperative level */
 
-	// Use of `DISCL_EXCLUSIVE | DISCL_FOREGROUND` resulted in Permission denial.
+	// Use of `DISCL_EXCLUSIVE | DISCL_FOREGROUND` results in permission denial.
 	// It works with `DISCL_NONEXCLUSIVE | DISCL_BACKGROUND` just fine.
-	hDIResult = IDirectInputDevice8_SetCooperativeLevel( pJoystickDevice, hWindow, DISCL_NONEXCLUSIVE | DISCL_BACKGROUND );
+	hDIResult = IDirectInputDevice8_SetCooperativeLevel(
+		/*    this */ pControllerDevice,
+		/*    hwnd */ hWindow,
+		/* dwFlags */ DISCL_NONEXCLUSIVE | DISCL_BACKGROUND );
 	if ( hDIResult != DI_OK ) {
-		fprintf( stderr, "Failed to set Joystick device cooperative level to %s. (0x%X)\n", "DISCL_NONEXCLUSIVE | DISCL_BACKGROUND", hDIResult );
-		return -6;
+		CONTRL_ERROR( -6, "Failed to set controller device cooperative level to %s. (0x%X)\n", "DISCL_NONEXCLUSIVE | DISCL_BACKGROUND", hDIResult );
 	}
-	printf( "Set Joystick device cooperative level to %s.\n", "DISCL_NONEXCLUSIVE | DISCL_BACKGROUND" );
+	CONTRL_TRACE( "Set controller device cooperative level to %s.", "DISCL_NONEXCLUSIVE | DISCL_BACKGROUND" );
 
 	/* Acquire device */
 
-	hDIResult = IDirectInputDevice8_Acquire( pJoystickDevice );
+	hDIResult = IDirectInputDevice8_Acquire(
+		/* this */ pControllerDevice );
 	if ( hDIResult != DI_OK ) {
-		fprintf( stderr, "Failed to acquire Joystick device. (0x%X)", hDIResult );
-		return -7;
+		CONTRL_ERROR( -7, "Failed to acquire controller device. (0x%X)\n", hDIResult );
 	}
-	printf( "Acquired Joystick device.\n" );
+	CONTRL_TRACE( "Acquired controller device.", NULL );
+
+	/* Get device capabilities */
+
+	DIDEVCAPS diDeviceCapabilities = { 0 };
+	diDeviceCapabilities.dwSize = sizeof( DIDEVCAPS );
+	hDIResult = IDirectInputDevice8_GetCapabilities(
+		/*        this */ pControllerDevice,
+		/* lpDIDevCaps */ &diDeviceCapabilities );
+	if ( hDIResult != DI_OK ) {
+		CONTRL_ERROR( -8, "Failed to get controller device capabilities. (0x%X)\n", hDIResult );
+	}
+
+#if CONTRL_DEBUG
+	contrl__debug_print_device_capabilities( &diDeviceCapabilities );
+#endif
 
 	int pollRate = 60;  // 60Hz = 60 times per second
 	float pollTimeIntervalMs = 1000.0f / pollRate;
@@ -286,12 +509,25 @@ enumDevices:
 
 	// Allocate string buffer on heap.
 #define BUFFER_SIZE 4096
-	char *buffer = malloc( BUFFER_SIZE * sizeof( char ) );
+	char *buffer = CONTRL_ALLOC( BUFFER_SIZE, char );
 	if ( buffer == NULL ) {
-		fprintf( stderr, "Failed to allocate %d bytes of memory for string buffer.", BUFFER_SIZE );
-		return -8;
+		CONTRL_ERROR( -9, "Failed to allocate %d bytes of memory for string buffer.\n", BUFFER_SIZE );
 	}
-	
+
+	/* Enumerate device effects */
+
+	DeviceEffectsSupportedContext ctxEffectsSupported = {
+		.nEffects = 0  // Out counter
+	};
+	hDIResult = IDirectInputDevice8_EnumEffects(
+		/*       this */ pControllerDevice,
+		/* lpCallback */ contrl__device_effects_supported_callback,
+		/*      pvRef */ &ctxEffectsSupported,
+		/*  dwEffType */ DIEFT_ALL );
+	if ( hDIResult != DI_OK ) {
+		CONTRL_ERROR( -10, "Failed to enumerate controller device effects. (0x%X)\n", hDIResult );
+	}
+
 	DIJOYSTATE js;
 	HRESULT hResult;
 	// Infinite loop.
@@ -309,21 +545,25 @@ enumDevices:
 
 		/* Read Joystick state */
 
-		hResult = IDirectInputDevice8_GetDeviceState( pJoystickDevice, sizeof( DIJOYSTATE ), &js );
+		hResult = IDirectInputDevice8_GetDeviceState(
+			/*    this */ pControllerDevice, 
+			/*  cbData */ sizeof( DIJOYSTATE ),
+			/* lpvData */ &js );
 		if ( hResult != DI_OK ) {
-			fprintf( stderr, "Failed to get Joystick state. (0x%X)\n", hResult );
+			CONTRL_WARN( "Failed to get controller device state. (0x%X)\n", hResult );
 			continue;
 		}
 
 		// Overwrite output with new data.
-		int written = print_controller_ps4( buffer, BUFFER_SIZE, &js );
+		int written = contrl_print_state_ps4( buffer, BUFFER_SIZE, &js );
 		WriteConsoleA( hConsoleOutput, buffer, written, NULL, NULL );
 	}
 
 	// The program actually never gets to this point.
 	// We are just being good guys.
-	IDirectInputDevice8_Release( pJoystickDevice );
-	free( buffer );
+	IDirectInputDevice8_Release(
+		/* this */ pControllerDevice );
+	CONTRL_FREE( buffer );
 
 	return 0;
 }
