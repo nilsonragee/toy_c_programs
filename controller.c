@@ -15,6 +15,7 @@
 #define CONTRL_REALLOC( pointer, old_size, new_size, type )  realloc( pointer, new_size * sizeof( type ) )
 #define CONTRL_FREE( pointer )                               free( pointer )
 
+
 #ifndef CONTRL_DEBUG
 	#define CONTRL_DEBUG 0
 #endif
@@ -32,6 +33,39 @@
 #define CONTRL_PRINT( format, ... )             contrl__fprintf( stdout, NULL, 0, format, __VA_ARGS__ )
 #define CONTRL_WPRINT( format, ... )            contrl__fwprintf( stdout, NULL, 0, format, __VA_ARGS__ )
 
+
+// ESC [ s  -- Save Cursor
+#define CONSOLE_SC "\x1B[s"
+#define CONSOLE_SC_LEN 3
+// ESC [ u  -- Restore cursor
+#define CONSOLE_RC "\x1B[u"
+#define CONSOLE_RC_LEN 3
+
+// GUID's Vendor IDs
+#define VID_SONY      0x054C
+#define VID_LOGITECH  0x046D
+
+// GUID's Product IDs
+#define PID_SONY_DUALSHOCK4  0x09CC
+#define PID_LOGITECH_G923    0xC266
+
+#define GUID_PRODUCT_GET_PID( guidData1 )  ( guidData1 >> 16 )
+#define GUID_PRODUCT_GET_VID( guidData1 )  ( guidData1 & 0x0000FFFF )
+
+#ifndef CONTRL_CUSTOM_BOOL
+enum bool_e {
+	false = 0,
+	true
+};
+typedef uint8_t bool;
+// Without double-negation (!!), the value will overflow.
+// For example: `flags (256) & flag (256) == 256`, which is logically `true`,
+// but it then gets casted to `uint8_t` which result in 0, a logical `false`.
+#define C_BOOL( expr )  ( !!( expr ) )
+#endif
+
+typedef int ( * PFN_PrintDeviceState )( char *buffer, size_t buffer_size, DIJOYSTATE *j );
+
 static void contrl__fprintf( FILE *stream, const char *prefix, size_t prefix_size, const char *format, ... ) {
 	fwrite( prefix, sizeof( char ), prefix_size, stream );
 	va_list args;
@@ -48,27 +82,6 @@ static void contrl__fwprintf( FILE *stream, const wchar_t *prefix, size_t prefix
 	va_end( args );
 }
 
-/*
-typedef struct DIJOYSTATE {
-    LONG    lX;              // x-axis position
-    LONG    lY;              // y-axis position
-    LONG    lZ;              // z-axis position
-    LONG    lRx;             // x-axis rotation
-    LONG    lRy;             // y-axis rotation
-    LONG    lRz;             // z-axis rotation
-    LONG    rglSlider[2];    // extra axes positions
-    DWORD   rgdwPOV[4];      // POV directions
-    BYTE    rgbButtons[32];  // 32 buttons
-} DIJOYSTATE, *LPDIJOYSTATE;
-*/
-
-#ifndef CONTROLLER_CUSTOM_BOOL
-enum bool_e {
-	false = 0,
-	true
-};
-typedef uint8_t bool;
-#endif
 
 typedef struct DeviceGetFirstContext {
 	LPDIRECTINPUT8        pDirectInput;        // In parameter.  Pointer to the instance of DirectInput8.
@@ -96,13 +109,6 @@ static BOOL CALLBACK contrl__device_effects_supported_callback( const DIEFFECTIN
 	return DIENUM_CONTINUE;
 }
 
-// ESC [ s  -- Save Cursor
-#define CONSOLE_SC "\x1B[s"
-#define CONSOLE_SC_LEN 3
-// ESC [ u  -- Restore cursor
-#define CONSOLE_RC "\x1B[u"
-#define CONSOLE_RC_LEN 3
-
 static void contrl__debug_print_device_info( const DIDEVICEINSTANCE *i ) {
 	const GUID *const gI = &i->guidInstance;
 	const GUID *const gP = &i->guidProduct;
@@ -122,8 +128,8 @@ static void contrl__debug_print_device_info( const DIDEVICEINSTANCE *i ) {
 	CONTRL_TRACE2( "TRACE: ", 7,
 		"Device info:\n"
 		"  dwSize: %lu\n"
-		"  guidInstance: 0x%08X %04hX %04hX %s (\"%.*s\")\n"
-		"  guidProduct: 0x%08X %04hX %04hX %s (\"%.*s\")\n"
+		"  guidInstance: %08X-%04hX-%04hX-%s (\"%.*s\")\n"
+		"  guidProduct: %08X-%04hX-%04hX-%s (\"%.*s\")\n"
 		"  dwDevType: 0x%08X\n",
 		i->dwSize,
 		gI->Data1, gI->Data2, gI->Data3, gIData4, 6, &gI->Data4[ 2 ],
@@ -143,19 +149,22 @@ static void contrl__debug_print_device_info( const DIDEVICEINSTANCE *i ) {
 #endif
 
 	CONTRL_PRINT(
-		"  guidFFDriver: 0x%08X %04hX %04hX %s (\"%.*s\")\n"
+		"  guidFFDriver: %08X-%04hX-%04hX-%s\n"
 		"  wUsagePage: 0x%08X\n"
 		"  wUsage: 0x%08X\n",
-		gD->Data1, gD->Data2, gD->Data3, gDData4, 6, &gD->Data4[ 2 ],
+		gD->Data1, gD->Data2, gD->Data3, gDData4,
 		i->wUsagePage,
 		i->wUsage );
+
+	CONTRL_TRACE( "Vendor ID (VID): 0x%04X, Product ID (PID): 0x%04X",
+		GUID_PRODUCT_GET_VID( gP->Data1 ), GUID_PRODUCT_GET_PID( gP->Data1 ) );
 }
 
 static void contrl__debug_print_device_capabilities( const DIDEVCAPS *c ) {
 	CONTRL_TRACE( "Device capabilities:\n"
 		"  dwSize: %u\n"
 		"  dwFlags: 0x%08X\n"
-		"  dwDevType: 0x%08X\n"
+		"  dwDevType: 0x%08X (type=0x%02X, subtype=0x%02X)\n"
 		"  dwAxes: %u\n"
 		"  dwButtons: %u\n"
 		"  dwPOVs: %u\n"
@@ -166,7 +175,7 @@ static void contrl__debug_print_device_capabilities( const DIDEVCAPS *c ) {
 		"  dwFFDriverVersion: 0x%08X",
 		c->dwSize,
 		c->dwFlags,
-		c->dwDevType,
+		c->dwDevType, GET_DIDEVICE_TYPE( c->dwDevType ), GET_DIDEVICE_SUBTYPE( c->dwDevType ),
 		c->dwAxes,
 		c->dwButtons,
 		c->dwPOVs,
@@ -177,7 +186,7 @@ static void contrl__debug_print_device_capabilities( const DIDEVCAPS *c ) {
 		c->dwFFDriverVersion );
 }
 
-int contrl_print_state_generic( char *buffer, size_t buffer_size, DIJOYSTATE *j ) {
+int contrl_print_device_state_generic( char *buffer, size_t buffer_size, DIJOYSTATE *j ) {
 	int cursor = 0;
 
 	// Position + Rotation
@@ -208,6 +217,8 @@ int contrl_print_state_generic( char *buffer, size_t buffer_size, DIJOYSTATE *j 
 	cursor += snprintf( buffer + cursor, buffer_size - cursor, "rgbButtons:\n" );
 	BYTE *pbValue = ( BYTE * )&j->rgbButtons;
 	for ( int i = 0; i < 32 / 4; i += 1 ) {
+		// Print 4 columns row-by-row.
+		// Each column continues previous one.
 		cursor += snprintf( buffer + cursor, buffer_size - cursor,
 			"  [%2d]: [%3hhu]  [%2d]: [%3hhu]  [%2d]: [%3hhu]  [%2d]: [%3hhu]\n",
 			i +  0, *( pbValue + i +  0 ),
@@ -277,7 +288,7 @@ static void contrl_test_haptics( const LPDIRECTINPUTDEVICE8 pControllerDevice ) 
 	}
 }
 
-int contrl_print_state_ps4( char *buffer, size_t buffer_size, DIJOYSTATE *j ) {
+int contrl_print_device_state_sony_dualshock4( char *buffer, size_t buffer_size, DIJOYSTATE *j ) {
 	// Don't judge...
 	BYTE bRect = j->rgbButtons[ 0 ];
 	BYTE bCross = j->rgbButtons[ 1 ];
@@ -315,6 +326,7 @@ int contrl_print_state_ps4( char *buffer, size_t buffer_size, DIJOYSTATE *j ) {
 			case 6: pszArrows[ 3 ] = u8"←"; break;
 		}
 	}
+
 	LONG lL2R2[ 2 ] = {
 		// L2:
 		j->lRx,
@@ -366,7 +378,7 @@ int contrl_print_state_ps4( char *buffer, size_t buffer_size, DIJOYSTATE *j ) {
 	
 	int cursor = 0;
 	cursor += snprintf( buffer + cursor, buffer_size - cursor,
-		"Arrows: [%s, %s, %s, %s] (%3ld)\n"
+		"Arrows: [%s, %s, %s, %s] (%3lu)\n"
 		"Shapes: [%s, %s, %s, %s]\n"
 		"Special: [%5s, %7s, %2s, %5s]\n"
 		"L1: [%3hhu] R1: [%3hhu]\n"
@@ -376,7 +388,7 @@ int contrl_print_state_ps4( char *buffer, size_t buffer_size, DIJOYSTATE *j ) {
 		"R Stick: [%3hhu, %5ld,%5ld] (%9.6f,%9.6f)\n",
 		pszArrows[ 0 ], pszArrows[ 1 ], pszArrows[ 2 ], pszArrows[ 3 ], dwDegrees,
 		pszShapes[ 0 ], pszShapes[ 1 ], pszShapes[ 2 ], pszShapes[ 3 ],
-		pszSpecials[ 0 ], pszSpecials[ 0 ], pszSpecials[ 0 ], pszSpecials[ 0 ],
+		pszSpecials[ 0 ], pszSpecials[ 1 ], pszSpecials[ 2 ], pszSpecials[ 3 ],
 		bL1, bR1,
 		bL2, lL2R2[ 0 ], fL2R2[ 0 ],
 		bR2, lL2R2[ 1 ], fL2R2[ 1 ],
@@ -386,18 +398,133 @@ int contrl_print_state_ps4( char *buffer, size_t buffer_size, DIJOYSTATE *j ) {
 	return cursor;
 }
 
+int contrl_print_device_state_logitech_g923( char *buffer, size_t buffer_size, DIJOYSTATE *j ) {
+	BYTE bCross = j->rgbButtons[ 0 ];
+	BYTE bRect = j->rgbButtons[ 1 ];
+	BYTE bCircle = j->rgbButtons[ 2 ];
+	BYTE bTri = j->rgbButtons[ 3 ];
+	const char *pszShapes[ 4 ] = {
+		( bCross )  ? u8"x" : "-",
+		( bRect )   ? u8"□" : "-",
+		( bCircle ) ? u8"o" : "-",
+		( bTri )    ? u8"△" : "-"
+	};
+
+	const char *pszArrows[ 4 ] = {
+		"-",  // ArrowUp
+		"-",  // ArrowRight
+		"-",  // ArrowDown
+		"-"   // ArrowLeft
+	};
+	DWORD dwArrows = j->rgdwPOV[ 0 ];
+	DWORD dwDegrees = 0;
+	if ( dwArrows != 0xFFFFFFFF ) {
+		dwDegrees = dwArrows / 100;
+		DWORD dwDirection = ( dwArrows + 2250 ) / 4500;  // Round to nearest 45 degrees
+		switch ( dwDirection % 8 ) {
+			case 1: pszArrows[ 1 ] = u8"→";  // Fall-through
+			case 0: pszArrows[ 0 ] = u8"↑"; break;
+
+			case 3: pszArrows[ 2 ] = u8"↓";  // Fall-through
+			case 2: pszArrows[ 1 ] = u8"→"; break;
+
+			case 5: pszArrows[ 3 ] = u8"←";  // Fall-through
+			case 4: pszArrows[ 2 ] = u8"↓"; break;
+
+			case 7: pszArrows[ 0 ] = u8"↑";  // Fall-through
+			case 6: pszArrows[ 3 ] = u8"←"; break;
+		}
+	}
+
+	LONG lAxes[ 4 ] = {
+		j->rglSlider[ 0 ],  // Clutch
+		j->lRz,  // Brake
+		j->lY,  // Throttle
+		j->lX  // Wheel
+	};
+	float fAxes[ 4 ] = {
+		// Pedals:
+		// From: 65535..0
+		//   To: 0f..1f
+		// Clutch:
+		1.0f - ( lAxes[ 0 ] * ( 1.0f / 65535.0f ) ),
+		// Brake:
+		1.0f - ( lAxes[ 1 ] * ( 1.0f / 65535.0f ) ),
+		// Throttle:
+		1.0f - ( lAxes[ 2 ] * ( 1.0f / 65535.0f ) ),
+		// Wheel:
+		// From:   0..32767..65535
+		//   To: -1f..0f..1f
+		( lAxes[ 3 ] == 32767 ) ? lAxes[ 3 ] * ( 1.0f / 32767.0f ) - 1.0f : lAxes[ 3 ] * ( 1.0f / 32767.5f ) - 1.0f
+	};
+
+	BYTE bPaddleR = j->rgbButtons[ 4 ];
+	BYTE bPaddleL = j->rgbButtons[ 5 ];
+	BYTE bR2 = j->rgbButtons[ 6 ];
+	BYTE bL2 = j->rgbButtons[ 7 ];
+	BYTE bSHARE = j->rgbButtons[ 8 ];
+	BYTE bOPTIONS = j->rgbButtons[ 9 ];
+	BYTE bR3 = j->rgbButtons[ 10 ];
+	BYTE bL3 = j->rgbButtons[ 11 ];
+	BYTE bPlus = j->rgbButtons[ 19 ];
+	BYTE bMinus = j->rgbButtons[ 20 ];
+	BYTE bDialR = j->rgbButtons[ 21 ];
+	BYTE bDialL = j->rgbButtons[ 22 ];
+	BYTE bENTER = j->rgbButtons[ 23 ];
+	BYTE bPS = j->rgbButtons[ 24 ];
+
+	const char *pszSpecials[ 4 ] = {
+		( bSHARE )   ? "SHARE"   : "-",
+		( bOPTIONS ) ? "OPTIONS" : "-",
+		( bENTER )   ? "ENTER"   : "-",
+		( bPS )      ? "PS"      : "-"
+	};
+
+	int cursor = 0;
+	cursor += snprintf( buffer + cursor, buffer_size - cursor,
+		"Pedals:\n"
+		"  Clutch: [%5d] (%9.6f)\n"
+		"   Brake: [%5d] (%9.6f)\n"
+		"Throttle: [%5d] (%9.6f)\n"
+		"   Wheel: [%5d] (%9.6f)\n"
+		"PaddleL: [%3hhu] PaddleR: [%3hhu]\n"
+		"Arrows: [%s, %s, %s, %s] (%3lu)\n"
+		"Shapes: [%s, %s, %s, %s]\n"
+		"Special: [%5s, %7s, %5s, %2s]\n"
+		"L2: [%3hhu] R2: [%3hhu]\n"
+		"L3: [%3hhu] R3: [%3hhu]\n"
+		"Plus/Minus: [%3hhu, %3hhu]\n"
+		"DialL: [%3hhu] DialR: [%3hhu]\n",
+		lAxes[ 0 ], fAxes[ 0 ],
+		lAxes[ 1 ], fAxes[ 1 ],
+		lAxes[ 2 ], fAxes[ 2 ],
+		lAxes[ 3 ], fAxes[ 3 ],
+		bPaddleL, bPaddleR,
+		pszArrows[ 0 ], pszArrows[ 1 ], pszArrows[ 2 ], pszArrows[ 3 ], dwDegrees,
+		pszShapes[ 0 ], pszShapes[ 1 ], pszShapes[ 2 ], pszShapes[ 3 ],
+		pszSpecials[ 0 ], pszSpecials[ 1 ], pszSpecials[ 2 ], pszSpecials[ 3 ],
+		bL2, bR2,
+		bL3, bR3,
+		bPlus, bMinus,
+		bDialL, bDialR );
+
+	return cursor;
+}
+
 int main( int arguments_count, char *arguments[] ) {
 	HINSTANCE hInstance = GetModuleHandleA( NULL ); // Current program's handle
 	if ( hInstance == NULL ) {
 		CONTRL_ERROR( -1, "Failed to get current program's module handle. (hInstance=0x%X)\n", hInstance );
 	}
-	CONTRL_PRINT( "Got current program's module handle. (hInstance=0x%X)\n", *hInstance );
+	CONTRL_TRACE( "Got current program's module handle. (hInstance=0x%X)", *hInstance );
 
 	// Enable control escape codes to save/reset cursor position.
-	DWORD dwMode;
-	GetConsoleMode( hInstance, &dwMode );
-	dwMode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
-	SetConsoleMode( hInstance, dwMode );
+	{
+		DWORD dwMode;
+		GetConsoleMode( hInstance, &dwMode );
+		dwMode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+		SetConsoleMode( hInstance, dwMode );
+	}
 
 	/* Initialize DirectInput */
 
@@ -412,7 +539,7 @@ int main( int arguments_count, char *arguments[] ) {
 	if ( hDIResult != DI_OK ) {
 		CONTRL_ERROR( -2, "Failed to initialize DirectInput8. (0x%X)\n", hDIResult );
 	}
-	CONTRL_PRINT( "Initialized DirectInput8.\n", NULL );
+	CONTRL_TRACE( "Initialized DirectInput8.", NULL );
 
 	/* Enumerate attached gamepad devices */
 
@@ -437,13 +564,54 @@ enumDevices:
 		system("pause");
 		goto enumDevices;
 	}
-	CONTRL_PRINT( "Found attached controller device.\n", NULL );
 
 	/* Print device info */
 
 #if CONTRL_DEBUG
 	contrl__debug_print_device_info( &diDeviceInstance );
 #endif
+
+	uint16_t deviceVID = GUID_PRODUCT_GET_VID( diDeviceInstance.guidProduct.Data1 );  // Vendor ID
+	uint16_t devicePID = GUID_PRODUCT_GET_PID( diDeviceInstance.guidProduct.Data1 );  // Product ID
+	const char *deviceVendor = "?";
+	const char *deviceProduct = "?";
+	PFN_PrintDeviceState print_device_state = contrl_print_device_state_generic;
+	if ( deviceVID == VID_SONY && devicePID == PID_SONY_DUALSHOCK4 ) {
+		deviceVendor = "Sony";
+		deviceProduct = "DualShock 4";
+		print_device_state = contrl_print_device_state_sony_dualshock4;
+	} else if ( deviceVID == VID_LOGITECH && devicePID == PID_LOGITECH_G923 ) {
+		deviceVendor = "Logitech";
+		deviceProduct = "G923 Racing Wheel";
+		print_device_state = contrl_print_device_state_logitech_g923;
+	}
+
+	CONTRL_PRINT( "Found attached controller device. (\"%s\", VendorID: 0x%04X (%s), ProductID: 0x%04X (%s))\n",
+		diDeviceInstance.tszProductName, deviceVID, deviceVendor, devicePID, deviceProduct );
+
+	/* Get device capabilities */
+
+	DIDEVCAPS diDeviceCapabilities = { 0 };
+	diDeviceCapabilities.dwSize = sizeof( DIDEVCAPS );
+	hDIResult = IDirectInputDevice8_GetCapabilities(
+		/*        this */ pControllerDevice,
+		/* lpDIDevCaps */ &diDeviceCapabilities );
+	if ( hDIResult != DI_OK ) {
+		CONTRL_ERROR( -8, "Failed to get controller device capabilities. (0x%X)\n", hDIResult );
+	}
+
+#if CONTRL_DEBUG
+	contrl__debug_print_device_capabilities( &diDeviceCapabilities );
+#endif
+
+	const DIDEVCAPS *const caps = &diDeviceCapabilities;
+	CONTRL_PRINT( "Device uses: %u axes, %u buttons, %u POVs.\n",
+		caps->dwAxes, caps->dwButtons, caps->dwPOVs );
+	bool ffb_supported = C_BOOL( caps->dwFlags & DIDC_FORCEFEEDBACK );
+	if ( ffb_supported ) {
+		CONTRL_PRINT( "Device supports Force-FeedBack. (Sample Period: %u, Min Time Resolution: %u)\n",
+			caps->dwFFSamplePeriod, caps->dwFFMinTimeResolution );
+	}
 
 	/* Set Joystick data format */
 
@@ -483,21 +651,6 @@ enumDevices:
 	}
 	CONTRL_TRACE( "Acquired controller device.", NULL );
 
-	/* Get device capabilities */
-
-	DIDEVCAPS diDeviceCapabilities = { 0 };
-	diDeviceCapabilities.dwSize = sizeof( DIDEVCAPS );
-	hDIResult = IDirectInputDevice8_GetCapabilities(
-		/*        this */ pControllerDevice,
-		/* lpDIDevCaps */ &diDeviceCapabilities );
-	if ( hDIResult != DI_OK ) {
-		CONTRL_ERROR( -8, "Failed to get controller device capabilities. (0x%X)\n", hDIResult );
-	}
-
-#if CONTRL_DEBUG
-	contrl__debug_print_device_capabilities( &diDeviceCapabilities );
-#endif
-
 	int pollRate = 60;  // 60Hz = 60 times per second
 	float pollTimeIntervalMs = 1000.0f / pollRate;
 	DWORD dwPollTimeIntervalMs = ( DWORD )pollTimeIntervalMs;  // at 60Hz, 1000 / 60 = 16.666f = 16
@@ -528,6 +681,8 @@ enumDevices:
 		CONTRL_ERROR( -10, "Failed to enumerate controller device effects. (0x%X)\n", hDIResult );
 	}
 
+	/* Pick device state print function specific to the device, or generic otherwise */
+
 	DIJOYSTATE js;
 	HRESULT hResult;
 	// Infinite loop.
@@ -555,7 +710,7 @@ enumDevices:
 		}
 
 		// Overwrite output with new data.
-		int written = contrl_print_state_ps4( buffer, BUFFER_SIZE, &js );
+		int written = print_device_state( buffer, BUFFER_SIZE, &js );
 		WriteConsoleA( hConsoleOutput, buffer, written, NULL, NULL );
 	}
 
